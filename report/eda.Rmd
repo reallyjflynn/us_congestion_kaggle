@@ -1,0 +1,204 @@
+---
+title: "Congestion"
+author: "JFlynn"
+date: "9/18/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE, 
+        message = FALSE, 
+        warning = FALSE)
+
+```
+
+```{r}
+
+library(tidyverse)
+library(tidyr)
+library(sf)
+library(scales)
+library(lubridate)
+library(feast)
+library(fable)
+library(ggforce)
+library(ggridges)
+library(yardstick)
+library(rsample)
+
+```
+
+
+```{r}
+
+train <- read_csv(
+        paste(here::here(), '/googleCloud/data/train.csv', sep = '')
+)
+
+
+```
+
+
+```{r}
+
+glimpse(train)
+
+train_long <- train %>%
+        pivot_longer(cols = starts_with("TotalTimeStopped_"), 
+                names_to = "Percentile", 
+                values_to = "time_stopped", 
+                values_drop_na = FALSE) %>%
+        mutate(Percentile = str_extract(Percentile, "\\d+")) 
+
+testing <- train_long %>%
+        filter(time_stopped == 'Inf')
+                
+
+
+ggplot(train_long) + 
+        geom_histogram(aes(time_stopped))
+
+min(train_long$time_stopped)
+
+View(head(train_long, 10), 'train_small')
+                
+```
+
+
+```{r}
+
+library(rsample)
+train_split <- initial_split(train_long, prop = .75, strata = 'Percentile')
+
+train <- training(train_split)
+test <- testing(train_split)
+
+```
+
+
+```{r}
+
+
+ggplot(train) +
+        geom_histogram(aes(time_stopped, 
+                fill = Percentile)) + 
+        theme_minimal() + 
+        facet_wrap(~Percentile) + 
+        scale_fill_viridis_d() +
+        scale_y_continuous(labels = scales::comma)
+
+
+max(train_long$time_stopped)
+
+fit_one <- glm(time_stopped ~ Percentile +
+                City + Month + Weekend + EntryHeading + Hour + 
+                ExitHeading, data = train, 
+        family = 'poisson')
+
+
+fit_df <- broom::tidy(fit)
+
+fit_df %>%
+        filter(term != '(Intercept)') %>%
+        filter(!term %in% c('Percentile80', 'Percentile60', 
+                'Percentile50', 'Percentile40')) %>%
+        ggplot() + 
+        geom_point(aes(forcats::fct_reorder(term, estimate), 
+                estimate)) + 
+        geom_errorbar(aes(x = forcats::fct_reorder(term, estimate), 
+                ymax = (estimate + std.error), 
+                ymin = (estimate - std.error))) + 
+        theme_minimal() + 
+        coord_flip() + 
+        labs(title = 'Super Basic First Model', 
+                x = 'Effect', y = 'Coefficient')
+
+
+```
+
+
+```{r}
+
+library(yardstick)
+
+results <- train %>%
+    mutate(`Linear regression` = predict(fit_one, train))
+
+metrics(results, truth = 'time_stopped', estimate = `Linear regression`)
+
+```
+
+
+### Time of Day
+
+```{r}
+
+train %>% 
+        # sample_frac(.1) %>%
+        filter(time_stopped != 0) %>%
+        ggplot(aes(x = time_stopped, y = Hour, 
+                fill = Hour, group = Hour)) + 
+        geom_density_ridges() +
+        theme_minimal() + 
+        scale_x_continuous(limits = c(0, 100)) +
+        labs(title = 'Delay at times of the Day')
+
+```
+
+
+### Month
+
+```{r}
+
+train %>% 
+        # sample_frac(.1) %>%
+        # filter(time_stopped != 0) %>%
+        ggplot(aes(x = time_stopped, y = Month, 
+                fill = Month, group = Month)) + 
+        geom_density_ridges() +
+        theme_minimal() + 
+        scale_x_continuous(limits = c(0, 100)) +
+        labs(title = 'Delay by Month')
+
+```
+
+
+```{r}
+
+train
+
+fit_two_d <- train %>% 
+        mutate(Month = factor(Month), 
+                Weekend = factor(Weekend),
+                tod = case_when(Hour < 7 ~ 'Early Morning', 
+                        Hour < 10 ~ 'Morning Rushhour', 
+                        Hour < 16 ~ 'Afternoon', 
+                        Hour < 19 ~ 'Evening Rushour', 
+                        Hour < 22 ~ 'Evening', 
+                        Hour < 25 ~ 'Night'))
+library(randomForest)
+library(caret)
+
+car_train <- readRDS("data/c1_training_full.rds")
+car_test <- readRDS("data/c1_testing_full.rds")
+
+# Train a random forest model
+fit_rf <- train(time_stopped ~ Percentile +
+                City + Month + Weekend + EntryHeading +  tod + 
+                ExitHeading, 
+                method = 'rf', 
+                data = fit_two_d,
+                trControl = trainControl(method = "none"))
+
+results <- train %>%
+    mutate(`Linear regression Two` = predict(fit_two, fit_two_d))
+
+metrics(results, truth = 'time_stopped', estimate = `Linear regression Two`)
+
+
+
+
+
+```
+
